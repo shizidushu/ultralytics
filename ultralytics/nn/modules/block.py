@@ -30,9 +30,10 @@ class DFL(nn.Module):
 
     def forward(self, x):
         """Applies a transformer layer on input tensor 'x' and returns a tensor."""
-        b, c, a = x.shape  # batch, channels, anchors
-        return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)).view(b, 4, a)
-        # return self.conv(x.view(b, self.c1, 4, a).softmax(1)).view(b, 4, a)
+        b, _, a = x.shape  # batch, channels, anchors
+        ds = torch.split(x.view(b, 4, self.c1, a), 1, dim=1)
+        xs = [d.view(b, self.c1, 1, a).softmax(1) for d in ds]
+        return self.conv(torch.cat(xs, 2)).view(b, 4, a)
 
 
 class Proto(nn.Module):

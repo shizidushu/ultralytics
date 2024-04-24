@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn.init import constant_, xavier_uniform_
 
-from ultralytics.utils.tal import dist2bbox, make_anchors
+from ultralytics.utils.tal import dist2bbox, make_anchors, custom_make_anchors
 
 from .block import DFL, Proto
 from .conv import Conv
@@ -43,6 +43,39 @@ class Detect(nn.Module):
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         shape = x[0].shape  # BCHW
+        if self.export and self.format == "onnx":
+            det_feats = []
+            cls_feats = []
+            for i in range(self.nl):
+                # x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+                det_feats.append(self.cv2[i](x[i]))
+                cls_feats.append(self.cv3[i](x[i]))
+            if self.dynamic or self.shape != shape:
+                # self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+                self.anchor_list, self.strides_list = ([x.transpose(0, 1) for x in sublist] for sublist in custom_make_anchors(det_feats, self.stride, 0.5))
+                # self.raw_anchors, self.raw_strides = custom_make_anchors(x, self.stride, 0.5)
+                # self.anchors = torch.cat(self.raw_anchors).transpose(0,1)
+                # self.strides = torch.cat(self.raw_strides).transpose(0,1)
+                self.anchors, self.strides = torch.cat(self.anchor_list, 1), torch.cat(self.strides_list, 1)
+                self.shape = shape
+            
+            box_list = []
+            cls_list = []
+            for i in range(self.nl):
+                # box_item, cls_item = x[i].view(shape[0], self.no, -1).split((self.reg_max * 4, self.nc), 1)
+                # box_item: [1, 64, 400], cls_item: [1, 1, 400]
+                box_item = det_feats[i].view(shape[0], self.reg_max * 4, -1)
+                cls_item = cls_feats[i].view(shape[0], self.nc, -1)
+                box_list.append(self.dfl(box_item))
+                cls_list.append(cls_item)
+            
+            box = torch.cat(box_list, -1) # [1, 4, 8400]
+            cls = torch.cat(cls_list, -1)
+                
+            dbox = dist2bbox(box, self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides.view(torch.Size([1]) + self.strides.shape)
+            
+            return [dbox, cls]
+        
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
         if self.training:
@@ -99,6 +132,17 @@ class Segment(Detect):
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
         p = self.proto(x[0])  # mask protos
         bs = p.shape[0]  # batch size
+        
+        if self.export and self.format == "onnx":
+            mc = [self.cv4[i](x[i]) for i in range(self.nl)]
+            x = self.detect(self, x)
+            bo = len(x)//3
+            relocated = []
+            for i in range(len(mc)):
+                relocated.extend(x[i*bo:(i+1)*bo])
+                relocated.extend([mc[i]])
+            relocated.extend([p])
+            return relocated
 
         mc = torch.cat([self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)  # mask coefficients
         x = self.detect(self, x)
@@ -119,16 +163,39 @@ class Pose(Detect):
 
         c4 = max(ch[0] // 4, self.nk)
         self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nk, 1)) for x in ch)
-
+        self.point_conv = nn.Conv2d(17, 17, 1, bias=False, groups=17).requires_grad_(False)
+        
     def forward(self, x):
         """Perform forward pass through YOLO model and return predictions."""
         bs = x[0].shape[0]  # batch size
+        if self.export and self.format == "onnx":
+            print("Entering custom export script of Pose")
+            kpt = [self.cv4[i](x[i]) for i in range(self.nl)]
+            x = self.detect(self, x)
+            regs = self.custom_kpts_decode(bs, kpt)
+            if isinstance(regs, list):
+                for y in regs:
+                    x.append(y)
+            else:
+                x.append(regs)
+            return x
         kpt = torch.cat([self.cv4[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], -1)  # (bs, 17*3, h*w)
         x = self.detect(self, x)
         if self.training:
             return x, kpt
         pred_kpt = self.kpts_decode(bs, kpt)
         return torch.cat([x, pred_kpt], 1) if self.export else (torch.cat([x[0], pred_kpt], 1), (x[1], kpt))
+    
+    def custom_kpts_decode(self, bs, kpts):
+        coords_list = []
+        confidence_list = []
+        for i in range(self.nl):
+            kpt = kpts[i].view(bs, self.nk, -1)
+            y = kpt.view(bs, *self.kpt_shape, -1)
+            a = (y[:, :, :2] * 2.0 + (self.anchor_list[i] - 0.5)) * self.strides_list[i]
+            coords_list.append(a)
+            confidence_list.append(y[:, :, 2:3])
+        return [torch.cat(coords_list, -1), torch.cat(confidence_list, -1)]
 
     def kpts_decode(self, bs, kpts):
         """Decodes keypoints."""
