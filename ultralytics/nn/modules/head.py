@@ -75,6 +75,10 @@ class Detect(nn.Module):
             dbox = dist2bbox(box, self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides.view(torch.Size([1]) + self.strides.shape)
             
             return [dbox, cls]
+            # if isinstance(self, Pose):
+            #     return [dbox, cls]
+            # else:
+            #     return torch.cat((dbox, cls), 1)
         
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)

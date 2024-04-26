@@ -73,4 +73,4 @@ setup(
         'Operating System :: MacOS',
         'Operating System :: Microsoft :: Windows', ],
     keywords='machine-learning, deep-learning, vision, ML, DL, AI, YOLO, YOLOv3, YOLOv5, YOLOv8, HUB, Ultralytics',
-    entry_points={'console_scripts': ['yolo = ultralytics.cfg:entrypoint', 'ultralytics = ultralytics.cfg:entrypoint']})
+    entry_points={'console_scripts': ['yolo = ultralytics.cfg:entrypoint', 'ultralytics = ultralytics.cfg:entrypoint', 'export_onnx_for_rknn = ultralytics.engine.export_onnx_for_rk3588:app']})
